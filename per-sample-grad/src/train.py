@@ -2,7 +2,6 @@ import time
 import math
 import torch
 import torch.nn.functional as F
-import pdb
 from pytorch_memlab import MemReporter
 
 bptt = 35
@@ -102,31 +101,42 @@ def train_outer_product(args, model, device, train_loader, optimizer, epoch, cri
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
                 100. * batch_idx / len(train_loader), loss.item()))
-        pdb.set_trace()
 
 
-def train_multi(args, model, device, train_loader, optimizer, epoch, criterion):
+def train_multi(args, model, device, train_loader, optimizer, epoch, criterion, text=False):
     '''
     Method for multiple model method for training with differential privacy (multi) 
     for image data 
     '''
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
-        data, target = data.to(device), target.to(device)
-        optimizer.zero_grad()
-        output = model(data)
-        loss = criterion(output, target)
+        if text:
+            x, text_lengths = data
+            actual_batch_size = x.shape[1]
+        else:
+            x = data
+            actual_batch_size = x.shape[0]
 
-        loss.backward()
-        model.reduce_batch()
-        optimizer.step()
-        model.reassign_params()
+        if actual_batch_size < args.batch_size:
+            print("last batch sized {} too small".format(actual_batch_size))
+        else: 
+            x, target = x.to(device), target.to(device)
 
-        freq = int(len(train_loader)/args.log_interval)
-        if batch_idx % freq == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, batch_idx * len(data), len(train_loader.dataset),
-                100. * batch_idx / len(train_loader), loss.item()))
+            optimizer.zero_grad()
+            predictions = model(x, text_lengths) if text else model(x)
+    
+            loss = criterion(predictions.reshape(target.shape),
+                            target) if text else criterion(predictions, target)
+            loss.backward()
+            model.reduce_batch()
+            optimizer.step()
+            model.reassign_params()
+
+            freq = int(len(train_loader)/args.log_interval)
+            if batch_idx % freq == 0:
+                print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                    epoch, batch_idx * len(data), len(train_loader.dataset),
+                    100. * batch_idx / len(train_loader), loss.item()))
 
 
 def train_single_fwd_sm(args, model, device, train_loader, optimizer, epoch, criterion):
@@ -251,89 +261,6 @@ def train_transformer(args, model, device, TEXT, train_data, optimizer, criterio
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         optimizer.step()
-
-        total_loss += loss.item()
-        log_interval = 200
-        if batch % log_interval == 0 and batch > 0:
-            cur_loss = total_loss / log_interval
-            elapsed = time.time() - start_time
-            print('| epoch {:3d} | {:5d}/{:5d} batches | '
-                  'lr {:02.2f} | ms/batch {:5.2f} | '
-                  'loss {:5.2f} | ppl {:8.2f}'.format(
-                      epoch, batch, len(train_data) // bptt, args.lr,
-                      elapsed * 1000 / log_interval,
-                      cur_loss, math.exp(cur_loss)))
-            total_loss = 0
-            start_time = time.time()
-
-
-def train_transformer_naive(args, model, device, TEXT, train_data, optimizer, criterion, epoch):
-    model.train()  # Turn on the train mode
-    total_loss = 0.
-    start_time = time.time()
-    ntokens = len(TEXT.vocab.stoi)
-    for batch, i in enumerate(range(0, train_data.size(0) - 1, bptt)):
-        data, targets = get_batch(train_data, i, maintain_shape=True)
-
-        pdb.set_trace()
-        for j in range(args.batch_size):
-            optimizer.zero_grad()
-            output = model(data[:, j].unsqueeze(1))
-            pdb.set_trace()
-            loss = criterion(output.view(-1, ntokens), targets[:, j])
-            loss.backward()
-            for p in model.parameters():
-                if j == 0:
-                    p.bgrad = torch.empty(
-                        (args.batch_size, p.grad.shape)).to(device)
-                p.bgrad[j] = p.grad.clone() / args.batch_size
-
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-        optimizer.step()
-
-        total_loss += loss.item()
-        log_interval = 200
-        if batch % log_interval == 0 and batch > 0:
-            cur_loss = total_loss / log_interval
-            elapsed = time.time() - start_time
-            print('| epoch {:3d} | {:5d}/{:5d} batches | '
-                  'lr {:02.2f} | ms/batch {:5.2f} | '
-                  'loss {:5.2f} | ppl {:8.2f}'.format(
-                      epoch, batch, len(train_data) // bptt, args.lr,
-                      elapsed * 1000 / log_interval,
-                      cur_loss, math.exp(cur_loss)))
-            total_loss = 0
-            start_time = time.time()
-
-
-def evaluate_transformer(eval_model, TEXT, data_source, criterion):
-    eval_model.eval()  # Turn on the evaluation mode
-    total_loss = 0.
-    ntokens = len(TEXT.vocab.stoi)
-    with torch.no_grad():
-        for i in range(0, data_source.size(0) - 1, bptt):
-            data, targets = get_batch(data_source, i)
-            output = eval_model(data)
-            output_flat = output.view(-1, ntokens)
-            total_loss += len(data) * criterion(output_flat, targets).item()
-    return total_loss / (len(data_source) - 1)
-
-
-def train_transformer_multi(args, model, device, TEXT, train_data, optimizer, criterion, epoch):
-    model.train()  # Turn on the train mode
-    total_loss = 0.
-    start_time = time.time()
-    ntokens = len(TEXT.vocab.stoi)
-    for batch, i in enumerate(range(0, train_data.size(0) - 1, bptt)):
-        data, targets = get_batch(train_data, i)
-        optimizer.zero_grad()
-        output = model(data)
-        loss = criterion(output.view(-1, ntokens), targets)
-        loss.backward()
-        model.reduce_batch()
-        #torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-        optimizer.step()
-        model.reassign_params()
 
         total_loss += loss.item()
         log_interval = 200

@@ -144,7 +144,7 @@ def run_cifar_model(args, device, kwargs):
         print("Runing CIFAR-10 with differential privacy using single forward")
         model = models.CIFAR_Net()
         Optimizer = optim.SGD
-        train_F = train.train_single_fwd_sm
+        train_F = train.train_single_fwd_lg
     
     model.to(device)
     optimizer_ = Optimizer(model.parameters(), lr=args.lr, momentum=0.9)

@@ -1,0 +1,5 @@
+numpy==1.16.2
+torch==1.2.0
+pytorch_memlab==0.0.4
+torchtext==0.5.0
+torchvision==0.4.0a0+6b959ee
