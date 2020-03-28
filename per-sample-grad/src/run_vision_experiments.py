@@ -62,6 +62,12 @@ def run_mnist_model(args, device, kwargs):
         Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=1.1, l2_norm_clip=1.0)
         train_F = train.train_naive
 
+    elif args.dp_mode == 'naive-sm':
+        print("Runing MNIST with differential privacy using naive gradient computations")
+        model = models.MNIST_Net()
+        Optimizer = optim.SGD
+        train_F = train.train_naive_sm
+
     elif args.dp_mode == 'oprod': 
         print("Runing MNIST with differential privacy using outer product")
         model = models_dp.MNIST_Net() 
@@ -78,7 +84,7 @@ def run_mnist_model(args, device, kwargs):
         train_F = train.train_multi
 
     elif args.dp_mode == 'single-fwd-lg':
-        print("Runing MNIST with differential privacy using naive gradient computations")
+        print("Runing MNIST with differential privacy using using large single forward model")
         model = models_dp.MNIST_Net()
         Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=1.1, l2_norm_clip=1.0)
         train_F = train.train_single_fwd_lg
@@ -180,7 +186,7 @@ def main():
     device = torch.device("cuda:0" if args.use_cuda else "cpu")
     kwargs = {'num_workers': 8, 'pin_memory': True} if args.use_cuda else {}
 
-    assert(args.dp_mode in ['no-dp', 'naive', 'oprod', 'multi', 'single-fwd-sm', 'single-fwd-lg'])
+    assert(args.dp_mode in ['no-dp', 'naive', 'naive-sm', 'oprod', 'multi', 'single-fwd-sm', 'single-fwd-lg'])
 
     if args.use_cuda:
         torch.cuda.synchronize()

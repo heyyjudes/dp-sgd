@@ -14,12 +14,13 @@ $ python run_vision_experiments.py --dp-mode oprod --batch_size 64 --dataset CIF
 classification task. The model includes recurrent and linear layers and contain about 2.7 million parameters.
 The script can be run like this:
 ```
-$ python run_language_experiments.py --dp-mode naive --batch_size 32 --lr 0.01 --epochs 3
+$ python run_language_experiments.py --dp-mode naive-sm --batch_size 32 --lr 0.01 --epochs 3
 ```
 
 The per-sample gradient methods available are:
 * "no-dp" : no differential privacy
 * "naive" : naive gradient computation (sequential)
+* "naive-sm" : naive memory efficient gradient computation (sequential)
 * "multi" : multiple model gradient computation
 * "oprod" : outer produced gradient computation (vision only)
 * "single-fwd-sm" : single forward memory efficient (vision only)

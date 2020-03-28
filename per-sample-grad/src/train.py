@@ -5,8 +5,33 @@ import torch.nn.functional as F
 from pytorch_memlab import MemReporter
 
 bptt = 35
+import pdb
 
+# helper methods 
+def print_runtime(epoch, batch_idx, loss, batch_size, train_loader): 
+    # print runtime
+    print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                    epoch, batch_idx * batch_size, len(train_loader.dataset),
+                    100. * batch_idx / len(train_loader), loss))
 
+def clip_grads(args, grads, model, noise_multiplier, l2_norm_clip): 
+    # clip gradients 
+        squared_norms = torch.stack([(p.grad.view(1, -1) ** 2).sum(dim=1) for p in model.parameters()])
+        grad_norm = torch.sqrt(squared_norms.sum(dim=0))
+
+        factor = l2_norm_clip/grad_norm
+        factor = torch.clamp(factor, max=1.0) 
+
+        # # add to gradient vector 
+        for g, p in zip(grads, model.parameters()):
+            g += (factor/args.batch_size)*p.grad.clone()
+
+def save_grads(grads, model, noise_multiplier, l2_norm_clip): 
+    # save gradient vector in actual 
+    for g, p in zip(grads, model.parameters()):
+        p.grad = torch.add(g, alpha=noise_multiplier*l2_norm_clip, other=torch.randn_like(g))
+
+# methods for training models 
 def train(args, model, device, train_loader, optimizer,  epoch, criterion, text=False):
     '''
     Method for training without differential privacy (no-dp) for text (batch size dim 1) or image data 
@@ -23,8 +48,6 @@ def train(args, model, device, train_loader, optimizer,  epoch, criterion, text=
         x, target = x.to(device), target.to(device)
         optimizer.zero_grad()
         predictions = model(x, text_lengths).squeeze(1) if text else model(x)
-
-        loss = criterion(predictions.reshape(target.shape),
                          target) if text else criterion(predictions, target)
         loss.backward()
         optimizer.step()
@@ -41,6 +64,7 @@ def train(args, model, device, train_loader, optimizer,  epoch, criterion, text=
 def train_naive(args, model, device, train_loader, optimizer, epoch, criterion, text=False):
     '''
     Method for naive method for training with differential privacy (naive) for text (batch size dim 1) or image data 
+    with O(BxP) memory
     '''
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
@@ -78,6 +102,52 @@ def train_naive(args, model, device, train_loader, optimizer, epoch, criterion, 
                     epoch, batch_idx *
                     actual_batch_size, len(train_loader.dataset),
                     100. * batch_idx / len(train_loader), loss.item()))
+
+def train_naive_sm(args, model, device, train_loader, optimizer, epoch, criterion, text=False):
+    '''
+    Method for naive method for training with differential privacy (naive) for text (batch size dim 1) or image data 
+    with O(P) memory
+    '''
+    start_time = time.perf_counter()
+    model.train()
+    for batch_idx, (data, target) in enumerate(train_loader):
+        if text:
+            x, text_lengths = data
+            actual_batch_size = x.shape[1]
+        else:
+            x = data
+            actual_batch_size = x.shape[0]
+        x, target = x.to(device), target.to(device)
+
+        if actual_batch_size < args.batch_size:
+            print("last batch sized {} too small".format(actual_batch_size))
+        else:
+            #initialize gradient vector size O(P)
+            grads = [torch.zeros((*p.shape)).to(device) for p in model.parameters()]
+            
+            for i in range(args.batch_size):
+                optimizer.zero_grad()
+                if text:
+                    output = model(x[:, i].unsqueeze(1), [text_lengths[i]])
+                    loss = criterion(output, target[i].reshape(1, 1, 1))
+                else:
+                    output = model(x[i].unsqueeze(0))
+                    loss = criterion(output, target[i].unsqueeze(0))
+
+                loss.backward()
+                
+                # compute gradient norm and clip gradient 
+                noise_multiplier = 1.1/args.batch_size
+                l2_norm_clip = 1.0
+                clip_grads(args, grads, model, noise_multiplier, l2_norm_clip)
+
+            save_grads(grads, model, noise_multiplier, l2_norm_clip)
+            
+            optimizer.step()
+
+            freq = int(len(train_loader)/args.log_interval)
+            if batch_idx % freq == 0:
+                print_runtime(epoch, batch_idx, loss.item(), actual_batch_size, train_loader)
 
 
 def train_outer_product(args, model, device, train_loader, optimizer, epoch, criterion):
@@ -139,74 +209,54 @@ def train_multi(args, model, device, train_loader, optimizer, epoch, criterion, 
                     100. * batch_idx / len(train_loader), loss.item()))
 
 
-def train_single_fwd_sm(args, model, device, train_loader, optimizer, epoch, criterion):
+def train_single_fwd_sm(args, model, device, train_loader, optimizer, epoch, criterion, text=False):
     '''
-    Method for single forward method for training with differential privacy (single-fwd-sm) 
-    for image data 
+    Method for single forward method for training with differential privacy for image data
+    with O(P) memory
     '''
-    noise_multiplier = 1.1/args.batch_size
-    l2_norm_clip = 1.0
     model.train()
+    start_time = time.perf_counter()
     for batch_idx, (data, target) in enumerate(train_loader):
-        data, target = data.to(device), target.to(device)
-        optimizer.zero_grad()
-        output = model(data)
-        loss = criterion(output, target, reduction='none')
+        if text:
+            x, text_lengths = data
+            actual_batch_size = x.shape[1]
+        else:
+            x = data
+            actual_batch_size = x.shape[0]
+        x, target = x.to(device), target.to(device)
 
-        grad_weights_dict = {}
-        grad_bias_dict = {}
+        if actual_batch_size < args.batch_size:
+            print("last batch sized {} too small".format(actual_batch_size))
+        else:
+            #initialize gradient vector size O(P)
+            grads = [torch.zeros((*p.shape)).to(device) for p in model.parameters()]
+            
+            predictions = model(x, text_lengths).squeeze(1) if text else model(x)
 
-        for key in model._modules:
-            grad_bias_dict[key] = torch.zeros(
-                (model._modules[key].bias.shape[0])).to(device)
-            flattened = model._modules[key].weight.flatten().shape
-            grad_weights_dict[key] = torch.zeros((flattened[0])).to(device)
+            loss = criterion(predictions.reshape(target.shape),
+                           target, reduction='none') if text else criterion(predictions, target, reduction='none')
 
-        for i in range(args.batch_size):
-
-            if i > 0:
+            for i in range(args.batch_size):
+                
                 optimizer.zero_grad()
-
-            if i == args.batch_size - 1:
-                loss[i].backward()
-            else:
                 loss[i].backward(retain_graph=True)
 
-            squared_norms = torch.stack(
-                [(p.grad.view(1, -1) ** 2).sum(dim=1) for p in model.parameters()])
-            grad_norm = torch.sqrt(squared_norms.sum(dim=0))
+                # # compute gradient norm and clip gradient 
+                noise_multiplier = 1.1/args.batch_size
+                l2_norm_clip = 1.0
+                clip_grads(args, grads, model, noise_multiplier, l2_norm_clip)
+            
+            save_grads(grads, model, noise_multiplier, l2_norm_clip)
+            
+            optimizer.step()
 
-            factor = 1.0 if l2_norm_clip >= grad_norm else torch.div(
-                l2_norm_clip, grad_norm)
-            std_noise = noise_multiplier * l2_norm_clip
-
-            for key in grad_weights_dict:
-                grad_weights_dict[key] += model._modules[key].weight.grad.data.flatten(
-                )*factor + std_noise * torch.randn_like(grad_weights_dict[key])
-                grad_bias_dict[key] += model._modules[key].bias.grad.data * \
-                    factor + std_noise * torch.randn_like(grad_bias_dict[key])
-
-            optimizer.zero_grad()
-
-        for key in grad_weights_dict:
-            grad_weights_dict[key] /= args.batch_size
-            grad_bias_dict[key] /= args.batch_size
-            model._modules[key].weight.grad.data = grad_weights_dict[key].data.reshape(
-                model._modules[key].weight.grad.data.shape)
-            model._modules[key].bias.grad.data = grad_bias_dict[key].data
-
-        optimizer.step()
-        freq = int(len(train_loader)/args.log_interval)
-        if batch_idx % freq == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, batch_idx * len(data), len(train_loader.dataset),
-                100. * batch_idx / len(train_loader), loss.sum().item()))
-
+            freq = int(len(train_loader)/args.log_interval)
+            if batch_idx % freq == 0:
+                print_runtime(epoch, batch_idx, loss.mean().item(), actual_batch_size, train_loader)
 
 def train_single_fwd_lg(args, model, device, train_loader, optimizer, epoch, criterion):
     '''
-    Method for single forward method for training with differential privacy (single-fwd-lg) 
-    for image data 
+    Method for single forward method for training with differential privacy with O(BxP) memory
     '''
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
