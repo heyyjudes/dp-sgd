@@ -145,24 +145,122 @@ def run_sentiment_model(args, device, kwargs):
         print(f'Epoch: {epoch+1:02} | Epoch Time: {epoch_mins}m {epoch_secs}s')
         print(f'Test Loss: {test_loss:.3f} | Test Acc: {test_acc*100:.2f}%')
 
+
+#####################################################################
+#       Transformer Experiments                                     #
+#####################################################################
+
+def run_language_model(args, device, kwargs):
+    # load data 
+    TEXT = torchtext.data.Field(tokenize=get_tokenizer("basic_english"),
+                            init_token='<sos>',
+                            eos_token='<eos>',
+                            lower=True)
+
+    # split into train, validation, and test sets
+    train_txt, val_txt, test_txt = torchtext.datasets.WikiText2.splits(TEXT)
+    # build vocab
+    TEXT.build_vocab(train_txt)
+    ntokens = len(TEXT.vocab.stoi) # the size of vocabulary
+
+    # batchify data
+    train_data = batchify(train_txt, args.batch_size, TEXT).to(device)
+    val_data = batchify(val_txt, args.test_batch_size, TEXT).to(device)
+    test_data = batchify(test_txt, args.test_batch_size, TEXT).to(device)
+
+    if args.dp_mode == 'no-dp': 
+        print("Running LM with Transformer with no differential privacy")
+        model = models.TransformerModel(ntokens)
+        train_F = train.train_transformer
+    elif args.dp_mode == 'naive':
+        print("Runing MNIST with differential privacy using naive gradient computations")
+        model = models.TransformerModel(ntokens)
+        train_F = train.train_transformer_naive
+    elif args.dp_mode == 'single-fwd': 
+        print("Runing MNIST with differential privacy using single forward")
+        model = models.TransformerModel(ntokens)
+        train_F = train.train_transformer_single_fwd 
+    else: 
+        print("Specified differential privacy mode not available. Please double check dp-mode argument")
+
+    model.to(device)
+    criterion = F.cross_entropy
+    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
+
+    best_val_loss = float("inf")
+    best_model = None
+
+    for epoch in range(1, args.epochs + 1):
+        epoch_start_time = time.time()
+        train_F(args, model, device, TEXT, train_data, optimizer, criterion, epoch)
+        val_loss = evaluate_lm(model, criterion, val_data, args.bptt, TEXT)
+        print('-' * 89)
+        print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
+            'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
+                                        val_loss, math.exp(val_loss)))
+        print('-' * 89)
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model = model
+        scheduler.step()
+
+def batchify(data, bsz, TEXT):
+        data = TEXT.numericalize([data.examples[0].text])
+        # Divide the dataset into bsz parts.
+        nbatch = data.size(0) // bsz
+        # Trim off any extra elements that wouldn't cleanly fit (remainders).
+        data = data.narrow(0, 0, nbatch * bsz)
+        # Evenly divide the data across the bsz batches.
+        data = data.view(bsz, -1).t().contiguous()
+        return data
+
+def evaluate_lm(eval_model, criterion, data_source, bptt, TEXT):
+    eval_model.eval() # Turn on the evaluation mode
+    total_loss = 0.
+    ntokens = len(TEXT.vocab.stoi)
+    with torch.no_grad():
+        for i in range(0, data_source.size(0) - 1, bptt):
+            data, targets = train.get_batch(data_source, i, bptt)
+            output = eval_model(data)
+            output_flat = output.view(-1, ntokens)
+            total_loss += len(data) * criterion(output_flat, targets).item()
+    return total_loss / (len(data_source) - 1)
+
+ 
 def main():
     # Training settings
     parser = argparse.ArgumentParser(description='PyTorch DP-SGD Experiments')
 
-    parser.add_argument('--batch_size', type=int, default=64, metavar='N',
-                        help='input batch size for training (default: 64)')
-    parser.add_argument('--test_batch_size', type=int, default=1000, metavar='N',
-                        help='input batch size for testing (default: 1000)')
-    parser.add_argument('--epochs', type=int, default=1, metavar='N',
+    ###############################################################################
+    #                   Arguments without default values                          #
+    #   different language tasks have different default values (specified later)  #
+    ###############################################################################
+
+    parser.add_argument('--batch_size', type=int, metavar='N',
+                        help='input batch size for training')
+    parser.add_argument('--test_batch_size', type=int, metavar='N',
+                        help='input batch size for testing')
+    parser.add_argument('--lr', type=float, metavar='LR',
+                        help='learning rate')
+
+    ###############################################################################
+    #                   Arguments with default values                             #
+    #                   common across language tasks                              #
+    ###############################################################################
+    parser.add_argument('--epochs', type=int, default=3, metavar='N',
                         help='number of epochs to train (default: 1)')
-    parser.add_argument('--lr', type=float, default=0.05, metavar='LR',
-                        help='learning rate (default: 0.05)')
     parser.add_argument('--use-cuda', action='store_true', default=True,
                         help='enable CUDA training')
     parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                         help='how many batches to wait before logging training status')
     parser.add_argument('--dp-mode', type=str, default='no-dp',
                         help='specifiy dp mode: "no-dp", "naive" or "multi"' )
+    parser.add_argument('--task', type=str, default='sentiment',
+                        help='specifiy dp mode: "sentiment", "lm"' )
+    parser.add_argument('--bptt', type=int, default=35,
+                        help='specifiy length of language model sequence' )
 
     args = parser.parse_args()
 
@@ -172,14 +270,34 @@ def main():
 
     kwargs = {'num_workers': 8, 'pin_memory': True} if args.use_cuda else {}
 
-    assert(args.dp_mode in ['no-dp', 'naive', 'multi'])
-
     if args.use_cuda:
         torch.cuda.synchronize()
 
     start_time = time.perf_counter()
 
-    run_sentiment_model(args, device, kwargs)
+    if args.task == 'sentiment': 
+        assert(args.dp_mode in ['no-dp', 'naive', 'multi'])
+        # task specific default parameters
+        if not args.batch_size:
+            args.batch_size = 64
+        if not args.test_batch_size: 
+            args.test_batch_size = 1000 
+        if not args.lr: 
+            args.lr = 0.05 
+        run_sentiment_model(args, device, kwargs)
+
+    elif args.task == 'lm': 
+        assert(args.dp_mode in ['no-dp', 'naive', 'single-fwd'])
+        # task specific default parameters 
+        if not args.batch_size:
+            args.batch_size = 20
+        if not args.test_batch_size: 
+            args.test_batch_size = 10 
+        if not args.lr: 
+            args.lr = 5.0 
+        run_language_model(args, device, kwargs)
+    else: 
+        print('please specifiy either "lm" or "sentiment"  as --task parameter')
 
     if args.use_cuda:
         torch.cuda.synchronize()

@@ -162,15 +162,26 @@ def run_cifar_model(args, device, kwargs):
 
 def main():
     # Training settings
-    parser = argparse.ArgumentParser(description='PyTorch DP-SGD Experiments')
-    parser.add_argument('--batch_size', type=int, default=64, metavar='N',
-                        help='input batch size for training (default: 64)')
-    parser.add_argument('--test_batch_size', type=int, default=1000, metavar='N',
-                        help='input batch size for testing (default: 1000)')
+    parser = argparse.ArgumentParser(description='PyTorch Vision DP-SGD Experiments')
+
+    ###############################################################################
+    #                   Arguments without default values                          #
+    #   different language tasks have different default values (specified later)  #
+    ###############################################################################
+
+    parser.add_argument('--batch_size', type=int, metavar='N',
+                        help='input batch size for training')
+    parser.add_argument('--test_batch_size', type=int, metavar='N',
+                        help='input batch size for testing')
+    parser.add_argument('--lr', type=float, metavar='LR',
+                        help='learning rate')
+
+    ###############################################################################
+    #                   Arguments with default values                             #
+    #                   common across language tasks                              #
+    ###############################################################################
     parser.add_argument('--epochs', type=int, default=1, metavar='N',
                         help='number of epochs to train (default: 1)')
-    parser.add_argument('--lr', type=float, default=0.05, metavar='LR',
-                        help='learning rate (default: 0.05)')
     parser.add_argument('--use_cuda', action='store_true', default=True,
                         help='enables CUDA training')
     parser.add_argument('--log-interval', type=int, default=10, metavar='N',
@@ -192,14 +203,25 @@ def main():
         torch.cuda.synchronize()
     start_time = time.perf_counter()
 
-    if args.dataset.upper() == 'MNIST': 
+    if args.dataset.upper() == 'MNIST':
+        if not args.batch_size:
+            args.batch_size = 64
+        if not args.test_batch_size: 
+            args.test_batch_size = 1000 
+        if not args.lr: 
+            args.lr = 0.05
         run_mnist_model(args, device, kwargs)
+
     elif args.dataset.upper() == 'CIFAR': 
-        args.lr = 0.01
+        if not args.batch_size:
+            args.batch_size = 32
+        if not args.test_batch_size: 
+            args.test_batch_size = 1000 
+        if not args.lr: 
+            args.lr = 0.01
         run_cifar_model(args, device, kwargs)
     else: 
         print('please specifiy either "MNIST" or "CIFAR"  as --dataset parameter')
-        return
 
     if args.use_cuda:
         torch.cuda.synchronize()
