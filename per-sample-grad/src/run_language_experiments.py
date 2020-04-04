@@ -1,6 +1,7 @@
 import time
 import math
 import torch
+import scipy
 import argparse
 import numpy as np
 import torch.nn.functional as F
@@ -20,9 +21,10 @@ from gradcnn import make_optimizer, replicate_model, replicate_model_text
 import models 
 import models_dp  
 import train 
+import pdb 
 
 # DEBUG flag skips loading word vecs for faster debugging 
-DEBUG = True
+DEBUG = False
 
 def epoch_time(start_time, end_time):
     elapsed_time = end_time - start_time
@@ -59,6 +61,16 @@ def evaluate(model, iterator, criterion):
             epoch_acc += acc.item()
     return epoch_loss / len(iterator), epoch_acc / len(iterator)
 
+def calculate_eps_approx(args, train_dataset): 
+    q = args.batch_size/len(train_dataset)
+    sigma = args.sigma
+    delta = args.delta
+    T = args.epochs/q
+    eps_1 = 2*(q/sigma)*scipy.sqrt(T*scipy.log(1/delta))
+    eps_2 = 2*scipy.log(1/delta)/(sigma**2 * scipy.log(1/(q*sigma)))
+    eps=max(eps_1,eps_2)
+    print('Best eps: ',eps)
+
 def run_sentiment_model(args, device, kwargs): 
     if DEBUG: 
         TEXT = data.Field(include_lengths = True)
@@ -90,6 +102,9 @@ def run_sentiment_model(args, device, kwargs):
     EMBEDDING_DIM = 100
     INPUT_DIM = len(TEXT.vocab)
     PAD_IDX = TEXT.vocab.stoi[TEXT.pad_token]
+    UNK_IDX = TEXT.vocab.stoi[TEXT.unk_token]
+
+    calculate_eps_approx(args, train_iterator.dataset) 
 
     if args.dp_mode == 'no-dp': 
         print("Runing LSTM Sentiment Classification with no differential privacy")
@@ -100,28 +115,44 @@ def run_sentiment_model(args, device, kwargs):
     elif args.dp_mode == 'naive': 
         print("Runing LSTM Sentiment Classification with differential privacy using naive gradient computations")
         model = models_dp.LSTM_net(INPUT_DIM, EMBEDDING_DIM, PAD_IDX)
-        Optimizer = make_optimizer(cls=optim.Adam, noise_multiplier=1.1, l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.Adam, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
         train_F = train.train_naive
+
+    elif args.dp_mode == 'naive-sm':
+        print("Runing LSTM Sentiment Classification with differential privacy using naive gradient computations")
+        model = models_dp.LSTM_net(INPUT_DIM, EMBEDDING_DIM, PAD_IDX)
+        Optimizer = optim.Adam
+        train_F = train.train_naive_sm
 
     elif args.dp_mode == 'multi': 
         print("Runing LSTM Sentiment Classification with differential privacy using multi gradient computations")
         MNet = replicate_model_text(net_class=models_dp.LSTM_net, batch_size = args.batch_size)
         model = MNet(vocab_size=INPUT_DIM, embedding_dim=EMBEDDING_DIM, pad_idx=PAD_IDX)
         model.get_detail(True)
-        Optimizer = make_optimizer(cls=optim.Adam, noise_multiplier=1.1, l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.Adam, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
         train_F = train.train_multi
-    else: 
-        print("error, not implemented yet ")
 
     print(f'The model has {count_parameters(model):,} trainable parameters')
     
     if not DEBUG: 
-        pretrained_embeddings = TEXT.vocab.vectors
-        model.embedding.weight.data.copy_(pretrained_embeddings)
-        UNK_IDX = TEXT.vocab.stoi[TEXT.unk_token]
 
-        model.embedding.weight.data[UNK_IDX] = torch.zeros(EMBEDDING_DIM)
-        model.embedding.weight.data[PAD_IDX] = torch.zeros(EMBEDDING_DIM)
+        pretrained_embeddings = TEXT.vocab.vectors
+        if args.dp_mode == 'multi': 
+            # add embeddings to weights of all sub models
+            for m in model.models: 
+                m.embedding.weight.data.copy_(pretrained_embeddings)
+                m.embedding.weight.data[UNK_IDX] = torch.zeros(EMBEDDING_DIM)
+                m.embedding.weight.data[PAD_IDX] = torch.zeros(EMBEDDING_DIM)
+            # add embedding weights to main model
+            model.model.embedding.weight.data.copy_(pretrained_embeddings)
+            model.model.embedding.weight.data[UNK_IDX] = torch.zeros(EMBEDDING_DIM)
+            model.model.embedding.weight.data[PAD_IDX] = torch.zeros(EMBEDDING_DIM)
+        else: 
+            model.embedding.weight.data.copy_(pretrained_embeddings)
+            model.embedding.weight.data[UNK_IDX] = torch.zeros(EMBEDDING_DIM)
+            model.embedding.weight.data[PAD_IDX] = torch.zeros(EMBEDDING_DIM)
+
+        
 
     optimizer_ = Optimizer(model.parameters())
     
@@ -136,6 +167,7 @@ def run_sentiment_model(args, device, kwargs):
         start_time = time.time()
         
         train_F(args, model, device, train_iterator, optimizer_, epoch, criterion, text=True)
+        train_loss, train_acc = evaluate(model, train_iterator, criterion)
         test_loss, test_acc = evaluate(model, test_iterator, criterion)
         
         end_time = time.time()
@@ -143,7 +175,8 @@ def run_sentiment_model(args, device, kwargs):
         epoch_mins, epoch_secs = epoch_time(start_time, end_time)
         
         print(f'Epoch: {epoch+1:02} | Epoch Time: {epoch_mins}m {epoch_secs}s')
-        print(f'Test Loss: {test_loss:.3f} | Test Acc: {test_acc*100:.2f}%')
+        print(f'Train Loss: {test_loss:.3f} | Train Acc: {test_acc*100:.2f}%')
+        print(f'Test Loss: {train_loss:.3f} | Test Acc: {train_acc*100:.2f}%')
 
 
 #####################################################################
@@ -168,6 +201,8 @@ def run_language_model(args, device, kwargs):
     val_data = batchify(val_txt, args.test_batch_size, TEXT).to(device)
     test_data = batchify(test_txt, args.test_batch_size, TEXT).to(device)
 
+    calculate_eps_approx(args, train_data.flatten())
+
     if args.dp_mode == 'no-dp': 
         print("Running LM with Transformer with no differential privacy")
         model = models.TransformerModel(ntokens)
@@ -183,6 +218,7 @@ def run_language_model(args, device, kwargs):
     else: 
         print("Specified differential privacy mode not available. Please double check dp-mode argument")
 
+    print(f'The model has {count_parameters(model):,} trainable parameters')
     model.to(device)
     criterion = F.cross_entropy
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr)
@@ -193,7 +229,7 @@ def run_language_model(args, device, kwargs):
 
     for epoch in range(1, args.epochs + 1):
         epoch_start_time = time.time()
-        train_F(args, model, device, TEXT, train_data, optimizer, criterion, epoch)
+        train_F(args, model, device, TEXT, train_data, optimizer, criterion, scheduler, epoch)
         val_loss = evaluate_lm(model, criterion, val_data, args.bptt, TEXT)
         print('-' * 89)
         print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
@@ -261,6 +297,13 @@ def main():
                         help='specifiy dp mode: "sentiment", "lm"' )
     parser.add_argument('--bptt', type=int, default=35,
                         help='specifiy length of language model sequence' )
+    parser.add_argument('--delta', type=float, default=10**(-5),
+                        help='privacy parameter')
+    parser.add_argument('--sigma', type=float, default=4, 
+                        help='noise multiplier')
+    parser.add_argument('--l2_clip', type=float, default=1, help='l2 clip')
+    parser.add_argument('--verbose', action='store_true', default=False,
+                        help='prints sub-epoch progress')
 
     args = parser.parse_args()
 
@@ -276,7 +319,7 @@ def main():
     start_time = time.perf_counter()
 
     if args.task == 'sentiment': 
-        assert(args.dp_mode in ['no-dp', 'naive', 'multi'])
+        assert(args.dp_mode in ['no-dp', 'naive', 'naive-sm', 'multi'])
         # task specific default parameters
         if not args.batch_size:
             args.batch_size = 64

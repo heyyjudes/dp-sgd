@@ -4,8 +4,6 @@ import torch
 import torch.nn.functional as F
 from pytorch_memlab import MemReporter
 
-import pdb
-
 ###############################################################################
 #                              Helper Methods                                 #
 #                                                                             #
@@ -23,7 +21,7 @@ def clip_grads(args, grads, model, noise_multiplier, l2_norm_clip):
 
         factor = l2_norm_clip/grad_norm
         factor = torch.clamp(factor, max=1.0) 
-
+        
         # # add to gradient vector 
         for g, p in zip(grads, model.parameters()):
             g += (factor/args.batch_size)*p.grad.clone()
@@ -43,13 +41,14 @@ def get_batch(source, i, bptt, maintain_shape=False):
         target = source[i+1:i+1+seq_len].view(-1)
     return data, target
 
-def print_lm_stats(args, cur_loss, epoch, batch, train_data, log_interval, elapsed):
+def print_lm_stats(args, cur_loss, epoch, batch, train_data, log_interval, elapsed, scheduler):
     # print language model training progress
-    print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2f} | ms/batch {:5.2f} | '
+    print('| epoch {:3d} | {:5d}/{:5d} batches | '
+                  'lr {:02.2f} | ms/batch {:5.2f} | '
                   'loss {:5.2f} | ppl {:8.2f}'.format(
-                      epoch, batch, len(train_data) // args.bptt, args.lr,
-                      elapsed * 1000 / log_interval,
-                      cur_loss, math.exp(cur_loss)))
+                    epoch, batch, len(train_data) // args.bptt, scheduler.get_lr()[0],
+                    elapsed * 1000 / log_interval,
+                    cur_loss, math.exp(cur_loss)))
 
 ###############################################################################
 #                     Methods for Classification Tasks                        #
@@ -76,8 +75,9 @@ def train(args, model, device, train_loader, optimizer,  epoch, criterion, text=
         loss.backward()
         optimizer.step()
 
+
         freq = int(len(train_loader)/args.log_interval)
-        if batch_idx % freq == 0:
+        if args.verbose and batch_idx % freq == 0:
             print_runtime(epoch, batch_idx, loss.item(), actual_batch_size, train_loader)
     return
 
@@ -118,7 +118,7 @@ def train_naive(args, model, device, train_loader, optimizer, epoch, criterion, 
 
             optimizer.step()
             freq = int(len(train_loader)/args.log_interval)
-            if batch_idx % freq == 0:
+            if args.verbose and batch_idx % freq == 0:
                print_runtime(epoch, batch_idx, loss.item(), actual_batch_size, train_loader)
 
 def train_naive_sm(args, model, device, train_loader, optimizer, epoch, criterion, text=False):
@@ -127,6 +127,8 @@ def train_naive_sm(args, model, device, train_loader, optimizer, epoch, criterio
     text (batch size dim 1) or image classification with O(P) memory
     '''
     model.train()
+    noise_multiplier = math.pow(args.sigma, 2)/args.batch_size
+    l2_norm_clip = 1.0
     for batch_idx, (data, target) in enumerate(train_loader):
         if text:
             x, text_lengths = data
@@ -154,8 +156,6 @@ def train_naive_sm(args, model, device, train_loader, optimizer, epoch, criterio
                 loss.backward()
                 
                 # compute gradient norm and clip gradient 
-                noise_multiplier = 1.1/args.batch_size
-                l2_norm_clip = 1.0
                 clip_grads(args, grads, model, noise_multiplier, l2_norm_clip)
 
             save_grads(grads, model, noise_multiplier, l2_norm_clip)
@@ -163,7 +163,7 @@ def train_naive_sm(args, model, device, train_loader, optimizer, epoch, criterio
             optimizer.step()
 
             freq = int(len(train_loader)/args.log_interval)
-            if batch_idx % freq == 0:
+            if args.verbose and batch_idx % freq == 0:
                 print_runtime(epoch, batch_idx, loss.item(), actual_batch_size, train_loader)
 
 
@@ -184,7 +184,7 @@ def train_outer_product(args, model, device, train_loader, optimizer, epoch, cri
         optimizer.step()
 
         freq = int(len(train_loader)/args.log_interval)
-        if batch_idx % freq == 0:
+        if args.verbose and batch_idx % freq == 0:
             print_runtime(epoch, batch_idx, loss.item(), args.batch_size, train_loader)
 
 
@@ -218,7 +218,7 @@ def train_multi(args, model, device, train_loader, optimizer, epoch, criterion, 
             model.reassign_params()
 
             freq = int(len(train_loader)/args.log_interval)
-            if batch_idx % freq == 0:
+            if args.verbose and batch_idx % freq == 0:
                 print_runtime(epoch, batch_idx, loss.item(), actual_batch_size, train_loader)
 
 def train_single_fwd_sm(args, model, device, train_loader, optimizer, epoch, criterion, text=False):
@@ -227,7 +227,8 @@ def train_single_fwd_sm(args, model, device, train_loader, optimizer, epoch, cri
     with O(P) memory
     '''
     model.train()
-    start_time = time.perf_counter()
+    noise_multiplier = math.pow(args.sigma, 2)/args.batch_size
+    l2_norm_clip = 1.0
     for batch_idx, (data, target) in enumerate(train_loader):
         if text:
             x, text_lengths = data
@@ -254,8 +255,6 @@ def train_single_fwd_sm(args, model, device, train_loader, optimizer, epoch, cri
                 loss[i].backward(retain_graph=True)
 
                 # # compute gradient norm and clip gradient 
-                noise_multiplier = 1.1/args.batch_size
-                l2_norm_clip = 1.0
                 clip_grads(args, grads, model, noise_multiplier, l2_norm_clip)
             
             save_grads(grads, model, noise_multiplier, l2_norm_clip)
@@ -263,7 +262,7 @@ def train_single_fwd_sm(args, model, device, train_loader, optimizer, epoch, cri
             optimizer.step()
 
             freq = int(len(train_loader)/args.log_interval)
-            if batch_idx % freq == 0:
+            if args.verbose and batch_idx % freq == 0:
                 print_runtime(epoch, batch_idx, loss.mean().item(), actual_batch_size, train_loader)
 
 def train_single_fwd_lg(args, model, device, train_loader, optimizer, epoch, criterion):
@@ -294,7 +293,7 @@ def train_single_fwd_lg(args, model, device, train_loader, optimizer, epoch, cri
         optimizer.step()
 
         freq = int(len(train_loader)/args.log_interval)
-        if batch_idx % freq == 0:
+        if args.verbose and batch_idx % freq == 0:
             print_runtime(epoch, batch_idx, loss.sum().item(), args.batch_size, train_loader)
 
 ###############################################################################
@@ -302,7 +301,7 @@ def train_single_fwd_lg(args, model, device, train_loader, optimizer, epoch, cri
 #                                                                             #
 ###############################################################################
 
-def train_transformer(args, model, device, TEXT, train_data, optimizer, criterion, epoch):
+def train_transformer(args, model, device, TEXT, train_data, optimizer, criterion, scheduler, epoch):
     '''
     Method for training without differential privacy (no-dp) for language modeling
     '''
@@ -324,11 +323,11 @@ def train_transformer(args, model, device, TEXT, train_data, optimizer, criterio
         if batch % log_interval == 0 and batch > 0:
             cur_loss = total_loss / log_interval
             elapsed = time.time() - start_time
-            print_lm_stats(args, cur_loss, epoch, batch, train_data, log_interval, elapsed)
+            print_lm_stats(args, cur_loss, epoch, batch, train_data, log_interval, elapsed, scheduler)
             total_loss = 0
             start_time = time.time()
 
-def train_transformer_naive(args, model, device, TEXT, train_data, optimizer, criterion, epoch):
+def train_transformer_naive(args, model, device, TEXT, train_data, optimizer, criterion, scheduler, epoch):
     '''
     Method for naive method for training with differential privacy (naive) for 
     language modeling with O(P) memory
@@ -336,6 +335,8 @@ def train_transformer_naive(args, model, device, TEXT, train_data, optimizer, cr
     model.train()  # Turn on the train mode
     total_loss = 0.
     start_time = time.time()
+    noise_multiplier = math.pow(args.sigma, 2)/args.batch_size
+    l2_norm_clip = 1.0
     ntokens = len(TEXT.vocab.stoi)
     for batch, i in enumerate(range(0, train_data.size(0) - 1, args.bptt)):
         data, targets = get_batch(train_data, i, args.bptt)
@@ -352,8 +353,6 @@ def train_transformer_naive(args, model, device, TEXT, train_data, optimizer, cr
                 loss = criterion(output.view(-1, ntokens), targets[i*args.bptt:i*args.bptt + args.bptt])
                 loss.backward()
                 # compute gradient norm and clip gradient 
-                noise_multiplier = 1.1/args.batch_size
-                l2_norm_clip = 1.0
                 clip_grads(args, grads, model, noise_multiplier, l2_norm_clip)
                                 
             save_grads(grads, model, noise_multiplier, l2_norm_clip)
@@ -363,21 +362,23 @@ def train_transformer_naive(args, model, device, TEXT, train_data, optimizer, cr
             total_loss += loss.item()
 
             log_interval = 200
-            if batch % log_interval == 0 and batch > 0:
+            if args.verbose and batch % log_interval == 0 and batch > 0:
                 cur_loss = total_loss / log_interval
                 elapsed = time.time() - start_time
-                print_lm_stats(args, cur_loss, epoch, batch, train_data, log_interval, elapsed)
+                print_lm_stats(args, cur_loss, epoch, batch, train_data, log_interval, elapsed, scheduler)
                 total_loss = 0
                 start_time = time.time()
 
-def train_transformer_single_fwd(args, model, device, TEXT, train_data, optimizer, criterion, epoch):
+def train_transformer_single_fwd(args, model, device, TEXT, train_data, optimizer, criterion, scheduler, epoch):
     '''
     Method for single forward method for training with differential privacy for 
     language modeling with O(P) memory
     '''
     model.train()  # Turn on the train mode
     total_loss = 0.
+    noise_multiplier = math.pow(args.sigma, 2)/args.batch_size
     start_time = time.time()
+    l2_norm_clip = 1.0
     ntokens = len(TEXT.vocab.stoi)
     for batch, i in enumerate(range(0, train_data.size(0) - 1, args.bptt)):
         data, targets = get_batch(train_data, i, args.bptt, maintain_shape=True)
@@ -394,8 +395,6 @@ def train_transformer_single_fwd(args, model, device, TEXT, train_data, optimize
                 loss = criterion(output[:, i, :], targets[:, i])
                 loss.backward(retain_graph=True)
                 # compute gradient norm and clip gradient 
-                noise_multiplier = 1.1/args.batch_size
-                l2_norm_clip = 1.0
                 clip_grads(args, grads, model, noise_multiplier, l2_norm_clip)
                 optimizer.zero_grad()
                                 
@@ -406,9 +405,9 @@ def train_transformer_single_fwd(args, model, device, TEXT, train_data, optimize
             total_loss += loss.item()
 
             log_interval = 200
-            if batch % log_interval == 0 and batch > 0:
+            if args.verbose and batch % log_interval == 0 and batch > 0:
                 cur_loss = total_loss / log_interval
                 elapsed = time.time() - start_time
-                print_lm_stats(args, cur_loss, epoch, batch, train_data, log_interval, elapsed)
+                print_lm_stats(args, cur_loss, epoch, batch, train_data, log_interval, elapsed, scheduler)
                 total_loss = 0
                 start_time = time.time()

@@ -1,6 +1,8 @@
 import time
 import math
 import torch
+import scipy
+import scipy.stats
 import argparse
 import numpy as np
 import torch.nn as nn 
@@ -16,8 +18,9 @@ from gradcnn import make_optimizer, replicate_model
 import models 
 import models_dp  
 import train 
+import pdb
 
-def test(args, model, device, test_loader, criterion):
+def test(args, model, device, test_loader, criterion, dataset_str):
     model.eval()
     test_loss = 0
     correct = 0
@@ -31,9 +34,43 @@ def test(args, model, device, test_loader, criterion):
 
     test_loss /= len(test_loader.dataset)
 
-    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)'.format(
-        test_loss, correct, len(test_loader.dataset),
+    print('{}: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)'.format(
+        dataset_str, test_loss, correct, len(test_loader.dataset),
         100. * correct / len(test_loader.dataset)))
+
+def calculate_eps(args, train_loader): 
+    q = args.batch_size/len(train_loader.dataset)
+    sigma = args.sigma
+    delta = args.delta
+    T = args.epochs/q
+    SAMPLE_SIZE = 100000 # Increase for getting more accurate results
+    alpha_list = np.arange(14,20,1) #Search with a wider and finer range for getting more accurate results.
+    eps_list = {}
+    for alpha in alpha_list:
+        P = lambda x: scipy.exp(-x**2/2)/(scipy.sqrt(2*scipy.pi))
+        Q = lambda x: ((1-q)*scipy.exp(-x**2/2)+q*scipy.exp(-(x-1/sigma)**2/2))/(scipy.sqrt(2*scipy.pi))
+        Normal_Samples = scipy.stats.norm.rvs(size=SAMPLE_SIZE)
+
+        D_alpha_P_Q = 1/(alpha-1) * scipy.log(np.mean([(P(x)/Q(x))**(alpha-1) for x in Normal_Samples]))
+        D_alpha_Q_P = 1/(alpha-1) * scipy.log(np.mean([(Q(x)/P(x))**alpha for x in Normal_Samples]))
+        #print(D_alpha_P_Q,D_alpha_Q_P)
+        eps = scipy.log(1/delta)/(alpha-1) + T*max(D_alpha_P_Q,D_alpha_Q_P)
+        eps_list[alpha]=eps
+        
+    eps = min(eps_list.values())
+    print('Best eps: ',eps)
+
+
+def calculate_eps_approx(args, train_loader): 
+    q = args.batch_size/len(train_loader.dataset)
+    sigma = args.sigma
+    delta = args.delta
+    T = args.epochs/q
+    eps_1 = 2*(q/sigma)*scipy.sqrt(T*scipy.log(1/delta))
+    eps_2 = 2*scipy.log(1/delta)/(sigma**2 * scipy.log(1/(q*sigma)))
+    eps=max(eps_1,eps_2)
+    print('Best eps: ',eps)
+
 
 def run_mnist_model(args, device, kwargs):
     train_loader = torch.utils.data.DataLoader(
@@ -50,6 +87,9 @@ def run_mnist_model(args, device, kwargs):
                        ])),
         batch_size=args.test_batch_size, shuffle=True, **kwargs)
 
+    if args.sigma != 0: 
+        calculate_eps_approx(args, train_loader)
+
     if args.dp_mode == 'no-dp': 
         print("Runing MNIST with no differential privacy")
         model = models.MNIST_Net()
@@ -59,7 +99,7 @@ def run_mnist_model(args, device, kwargs):
     elif args.dp_mode == 'naive':
         print("Runing MNIST with differential privacy using naive gradient computations")
         model = models_dp.MNIST_Net()
-        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=1.1, l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
         train_F = train.train_naive
 
     elif args.dp_mode == 'naive-sm':
@@ -72,7 +112,7 @@ def run_mnist_model(args, device, kwargs):
         print("Runing MNIST with differential privacy using outer product")
         model = models_dp.MNIST_Net() 
         model.get_detail(True)
-        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=1.1, l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
         train_F = train.train_outer_product
         
     elif args.dp_mode == 'multi':
@@ -80,16 +120,16 @@ def run_mnist_model(args, device, kwargs):
         MNet = replicate_model(net_class=models_dp.MNIST_Net, batch_size=args.batch_size)
         model = MNet()
         model.get_detail(True)
-        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=1.1, l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
         train_F = train.train_multi
 
     elif args.dp_mode == 'single-fwd-lg':
         print("Runing MNIST with differential privacy using using large single forward model")
         model = models_dp.MNIST_Net()
-        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=1.1, l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
         train_F = train.train_single_fwd_lg
 
-    else: 
+    elif args.dp_mode == 'single-fwd-sm': 
         print("Runing MNIST with differential privacy using single forward")
         model = models.MNIST_Net()
         Optimizer = optim.SGD
@@ -101,7 +141,9 @@ def run_mnist_model(args, device, kwargs):
 
     for epoch in range(1, args.epochs + 1):
         train_F(args, model, device, train_loader, optimizer_, epoch, criterion)
-        test(args, model, device, test_loader, F.cross_entropy)
+        print("Epoch: {}".format(epoch))
+        test(args, model, device, train_loader, F.cross_entropy, 'Train Set')
+        test(args, model, device, test_loader, F.cross_entropy, 'Test Set')
 
 def run_cifar_model(args, device, kwargs):
     # load CIFAR dataset
@@ -119,6 +161,8 @@ def run_cifar_model(args, device, kwargs):
     test_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size,
                                          shuffle=False, num_workers=2)
     
+    calculate_eps_approx(args, train_loader)
+
     if args.dp_mode == 'no-dp': 
         print("Runing CIFAR-10 with no differential privacy")
         model = models.CIFAR_Net()
@@ -128,14 +172,14 @@ def run_cifar_model(args, device, kwargs):
     elif args.dp_mode == 'naive':
         print("Runing CIFAR-10 with differential privacy using naive gradient computations")
         model = models_dp.CIFAR_Net()
-        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=1.1, l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
         train_F = train.train_naive
 
     elif args.dp_mode == 'oprod': 
         print("Runing CIFAR-10 with differential privacy using outer product")
         model = models_dp.CIFAR_Net() 
         model.get_detail(True)
-        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=1.1, l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
         train_F = train.train_outer_product
         
     elif args.dp_mode == 'multi':
@@ -143,7 +187,7 @@ def run_cifar_model(args, device, kwargs):
         MNet = replicate_model(net_class=models_dp.CIFAR_Net, batch_size=args.batch_size)
         model = MNet()
         model.get_detail(True)
-        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=1.1, l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
         train_F = train.train_multi
 
     else: 
@@ -154,11 +198,15 @@ def run_cifar_model(args, device, kwargs):
     
     model.to(device)
     optimizer_ = Optimizer(model.parameters(), lr=args.lr, momentum=0.9)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer_, 3.0, gamma=0.80)
     criterion = F.cross_entropy
 
     for epoch in range(1, args.epochs + 1):
         train_F(args, model, device, train_loader, optimizer_, epoch, criterion)
-        test(args, model, device, test_loader, F.cross_entropy)
+        print("Epoch: {}".format(epoch))
+        test(args, model, device, train_loader, F.cross_entropy, 'Train Set')
+        test(args, model, device, test_loader, F.cross_entropy, 'Test Set')
+        scheduler.step() 
 
 def main():
     # Training settings
@@ -190,6 +238,13 @@ def main():
                         help='specifiy dp mode: "no-dp", "naive", "oprod", "multi" or "single-fwd"' )
     parser.add_argument('--dataset', type=str, default='MNIST',
                         help='specifiy data task: "MNIST" or "CIFAR"')
+    parser.add_argument('--delta', type=float, default=10**(-5),
+                        help='privacy parameter')
+    parser.add_argument('--sigma', type=float, default=1.9, 
+                        help='noise multiplier')
+    parser.add_argument('--l2_clip', type=float, default=1, help='l2 clip')
+    parser.add_argument('--verbose', action='store_true', default=False,
+                        help='prints sub-epoch progress')
 
     args = parser.parse_args()
 
