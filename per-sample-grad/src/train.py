@@ -127,7 +127,7 @@ def train_naive_sm(args, model, device, train_loader, optimizer, epoch, criterio
     text (batch size dim 1) or image classification with O(P) memory
     '''
     model.train()
-    noise_multiplier = math.pow(args.sigma, 2)/args.batch_size
+    noise_multiplier = args.sigma/args.batch_size
     l2_norm_clip = 1.0
     for batch_idx, (data, target) in enumerate(train_loader):
         if text:
@@ -227,7 +227,7 @@ def train_single_fwd_sm(args, model, device, train_loader, optimizer, epoch, cri
     with O(P) memory
     '''
     model.train()
-    noise_multiplier = math.pow(args.sigma, 2)/args.batch_size
+    noise_multiplier = args.sigma/args.batch_size
     l2_norm_clip = 1.0
     for batch_idx, (data, target) in enumerate(train_loader):
         if text:
@@ -335,7 +335,7 @@ def train_transformer_naive(args, model, device, TEXT, train_data, optimizer, cr
     model.train()  # Turn on the train mode
     total_loss = 0.
     start_time = time.time()
-    noise_multiplier = math.pow(args.sigma, 2)/args.batch_size
+    noise_multiplier = args.sigma/args.batch_size
     l2_norm_clip = 1.0
     ntokens = len(TEXT.vocab.stoi)
     for batch, i in enumerate(range(0, train_data.size(0) - 1, args.bptt)):
@@ -376,7 +376,7 @@ def train_transformer_single_fwd(args, model, device, TEXT, train_data, optimize
     '''
     model.train()  # Turn on the train mode
     total_loss = 0.
-    noise_multiplier = math.pow(args.sigma, 2)/args.batch_size
+    noise_multiplier = args.sigma/args.batch_size
     start_time = time.time()
     l2_norm_clip = 1.0
     ntokens = len(TEXT.vocab.stoi)

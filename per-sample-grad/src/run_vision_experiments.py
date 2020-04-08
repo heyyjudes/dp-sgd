@@ -99,7 +99,7 @@ def run_mnist_model(args, device, kwargs):
     elif args.dp_mode == 'naive':
         print("Runing MNIST with differential privacy using naive gradient computations")
         model = models_dp.MNIST_Net()
-        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=args.sigma, l2_norm_clip=1.0)
         train_F = train.train_naive
 
     elif args.dp_mode == 'naive-sm':
@@ -112,7 +112,7 @@ def run_mnist_model(args, device, kwargs):
         print("Runing MNIST with differential privacy using outer product")
         model = models_dp.MNIST_Net() 
         model.get_detail(True)
-        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=args.sigma, l2_norm_clip=1.0)
         train_F = train.train_outer_product
         
     elif args.dp_mode == 'multi':
@@ -120,13 +120,13 @@ def run_mnist_model(args, device, kwargs):
         MNet = replicate_model(net_class=models_dp.MNIST_Net, batch_size=args.batch_size)
         model = MNet()
         model.get_detail(True)
-        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=args.sigma, l2_norm_clip=1.0)
         train_F = train.train_multi
 
     elif args.dp_mode == 'single-fwd-lg':
         print("Runing MNIST with differential privacy using using large single forward model")
         model = models_dp.MNIST_Net()
-        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=args.sigma, l2_norm_clip=1.0)
         train_F = train.train_single_fwd_lg
 
     elif args.dp_mode == 'single-fwd-sm': 
@@ -172,14 +172,14 @@ def run_cifar_model(args, device, kwargs):
     elif args.dp_mode == 'naive':
         print("Runing CIFAR-10 with differential privacy using naive gradient computations")
         model = models_dp.CIFAR_Net()
-        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=args.sigma, l2_norm_clip=1.0)
         train_F = train.train_naive
 
     elif args.dp_mode == 'oprod': 
         print("Runing CIFAR-10 with differential privacy using outer product")
         model = models_dp.CIFAR_Net() 
         model.get_detail(True)
-        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=args.sigma, l2_norm_clip=1.0)
         train_F = train.train_outer_product
         
     elif args.dp_mode == 'multi':
@@ -187,7 +187,7 @@ def run_cifar_model(args, device, kwargs):
         MNet = replicate_model(net_class=models_dp.CIFAR_Net, batch_size=args.batch_size)
         model = MNet()
         model.get_detail(True)
-        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.SGD, noise_multiplier=args.sigma, l2_norm_clip=1.0)
         train_F = train.train_multi
 
     else: 

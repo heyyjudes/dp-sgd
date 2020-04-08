@@ -115,7 +115,7 @@ def run_sentiment_model(args, device, kwargs):
     elif args.dp_mode == 'naive': 
         print("Runing LSTM Sentiment Classification with differential privacy using naive gradient computations")
         model = models_dp.LSTM_net(INPUT_DIM, EMBEDDING_DIM, PAD_IDX)
-        Optimizer = make_optimizer(cls=optim.Adam, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.Adam, noise_multiplier=args.sigma, l2_norm_clip=1.0)
         train_F = train.train_naive
 
     elif args.dp_mode == 'naive-sm':
@@ -129,7 +129,7 @@ def run_sentiment_model(args, device, kwargs):
         MNet = replicate_model_text(net_class=models_dp.LSTM_net, batch_size = args.batch_size)
         model = MNet(vocab_size=INPUT_DIM, embedding_dim=EMBEDDING_DIM, pad_idx=PAD_IDX)
         model.get_detail(True)
-        Optimizer = make_optimizer(cls=optim.Adam, noise_multiplier=math.pow(args.sigma, 2), l2_norm_clip=1.0)
+        Optimizer = make_optimizer(cls=optim.Adam, noise_multiplier=args.sigma, l2_norm_clip=1.0)
         train_F = train.train_multi
 
     print(f'The model has {count_parameters(model):,} trainable parameters')
